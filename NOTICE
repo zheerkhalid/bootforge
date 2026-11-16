@@ -1,0 +1,55 @@
+BootForge
+Copyright (c) 2026 Zheer Khalid (https://zheer.dev)
+Licensed under the MIT License (see LICENSE).
+
+What BootForge does NOT contain
+-------------------------------
+
+BootForge ships no boot loaders, boot sectors, firmware drivers or other
+binaries taken from other projects. The partition tables and the FAT32 and
+exFAT file systems it writes are produced by its own code; the boot sectors
+it writes contain only a tiny original "not bootable from this sector" stub.
+Drives made in file-copy mode start through the UEFI boot loader that is
+already inside the image you supply (EFI\BOOT\BOOT*.EFI); drives made in
+image mode are byte-for-byte copies of your image.
+
+Because of this, BootForge does not make BIOS/CSM-bootable drives from
+non-hybrid ISO images and does not offer an NTFS + UEFI driver layout: both
+would need third-party boot code.
+
+Tools of the operating system
+-----------------------------
+
+To split a Windows install.wim that is larger than FAT32 allows, BootForge
+runs the DISM tool that is part of Windows (%SystemRoot%\System32\Dism.exe)
+on your PC. DISM is not distributed with BootForge.
+
+Rust crates
+-----------
+
+BootForge is built with open-source Rust crates, among them eframe / egui,
+image, rfd, serde, serde_json, the RustCrypto hash crates (sha2, sha1, md-5),
+crc32fast, tiny-skia and embed-resource (build time) and the windows crate.
+Each is used under its own licence (MIT and/or Apache-2.0 for most); see
+Cargo.lock for the exact versions and each crate for its terms.
+
+Test fixtures
+-------------
+
+tests/fixtures holds a few tiny optical-disc images used by the unit tests.
+They were generated on Windows with its IMAPI2 file-system-image API from
+invented files and contain no third-party software.
+
+Fonts
+-----
+
+BootForge loads the Segoe UI and Segoe MDL2 Assets fonts that are installed
+with Windows at run time. They are not distributed with BootForge.
+
+Names
+-----
+
+"Windows" is a trademark of Microsoft; it is used here only to describe
+the images and the operating system BootForge works with. BootForge is not
+affiliated with or endorsed by Microsoft or by the makers of any other
+bootable-media tool.
