@@ -31,12 +31,25 @@ pub struct HashState {
     pub sums: Option<Checksums>,
     pub error: Option<String>,
     pub pasted: String,
+    /// Look for a checksum file next to a chosen file (off in demo mode,
+    /// which reads nothing).
+    pub probe: bool,
+    /// The checksum file found next to the file, and the checksum it lists.
+    pub published: Option<(String, String)>,
     gen: u64,
     /// A verdict fixed for the screenshot, valid while the pasted text is this.
     staged: Option<(String, HashVerdict)>,
 }
 
 impl HashState {
+    /// `probe`: look for a checksum file next to a chosen file.
+    pub fn new(probe: bool) -> HashState {
+        HashState {
+            probe,
+            ..HashState::default()
+        }
+    }
+
     /// Selects a file; results of another file are dropped.
     pub fn set_file(&mut self, path: PathBuf, size: Option<u64>) {
         if self.file.as_ref() == Some(&path) {
@@ -44,6 +57,21 @@ impl HashState {
             return;
         }
         self.cancel();
+        // A checksum that was filled in for the previous file does not
+        // belong to this one; what the user pasted stays.
+        if let Some((_, old)) = self.published.take() {
+            if self.pasted == old {
+                self.pasted.clear();
+            }
+        }
+        if self.probe {
+            self.published = backend::published_checksum(&path);
+            if let Some((_, digest)) = &self.published {
+                if self.pasted.trim().is_empty() {
+                    self.pasted = digest.clone();
+                }
+            }
+        }
         self.file = Some(path);
         self.size = size;
         self.sums = None;
@@ -66,6 +94,7 @@ impl App {
         let sums = demo::checksums();
         self.hash.pasted = sums.sha256.clone();
         self.hash.staged = Some((sums.sha256.clone(), HashVerdict::Match("SHA-256")));
+        self.hash.published = Some(("SHA256SUMS".into(), sums.sha256.clone()));
         self.hash.sums = Some(sums);
     }
 
@@ -88,7 +117,7 @@ impl App {
         }
     }
 
-    fn start_hash(&mut self, ctx: &egui::Context) {
+    pub(super) fn start_hash(&mut self, ctx: &egui::Context) {
         let Some(path) = self.hash.file.clone() else {
             return;
         };
@@ -149,6 +178,26 @@ impl App {
             }
             Err(e) => self.hash.error = Some(e),
         }
+    }
+
+    /// Where the image on the Create page stands against a checksum that was
+    /// published next to it (`None`: no such checksum, or another file is
+    /// on the Checksums page).
+    pub(super) fn published_check(&self) -> Option<logic::PublishedCheck> {
+        let (file, digest) = self.hash.published.as_ref()?;
+        if self.hash.file.as_deref() != self.image.path() {
+            return None;
+        }
+        let verdict = self
+            .hash
+            .sums
+            .as_ref()
+            .map(|sums| backend::compare_hash(digest, sums));
+        Some(logic::published_check(
+            file,
+            self.hash.run.is_some(),
+            verdict,
+        ))
     }
 
     fn verdict(&self) -> HashVerdict {
@@ -374,6 +423,17 @@ impl App {
                             .margin(Margin::symmetric(10, 8))
                             .desired_width(f32::INFINITY),
                     );
+                    if let Some((file, digest)) = &self.hash.published {
+                        if self.hash.pasted == *digest {
+                            ui.label(
+                                RichText::new(format!(
+                                    "Filled in from {file}, found next to the file."
+                                ))
+                                .size(12.5)
+                                .color(p.muted),
+                            );
+                        }
+                    }
                     ui.horizontal(|ui| {
                         ui.set_height(22.0);
                         if self.hash.sums.is_none() {

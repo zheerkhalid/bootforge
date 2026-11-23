@@ -183,6 +183,18 @@ d = dict(files)
 wim = [n for n in names if n.lower() == "sources/install.wim"][0]
 assert d[wim][:8] == b"MSWIM\0\0\0", "install.wim starts with the WIM magic"
 print("  install.wim", len(d[wim]), "bytes")
+# The self-test writes this image with every Windows Setup option on: the
+# answer file must be there and be well-formed XML (parsed by Python's own parser).
+import xml.etree.ElementTree as ET
+answer = [n for n in names if n.lower() == "autounattend.xml"]
+assert answer, "autounattend.xml is on the volume"
+ns = "{urn:schemas-microsoft-com:unattend}"
+root = ET.fromstring(d[answer[0]])
+passes = [s.get("pass") for s in root.findall(ns + "settings")]
+assert root.tag == ns + "unattend" and passes == ["windowsPE", "specialize", "oobeSystem"], passes
+commands = [e.text for e in root.iter(ns + "Path")]
+assert len(commands) == 4 and all(c.startswith("reg add HKLM") for c in commands), commands
+print("  autounattend.xml", len(d[answer[0]]), "bytes, well-formed, passes:", ", ".join(passes))
 whole = d[wim]
 
 img = open(os.path.join(keep, "device-files-split.img"), "rb").read()

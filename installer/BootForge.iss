@@ -1,7 +1,11 @@
 ; BootForge installer (Inno Setup 6).
 
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "1.1.0"
+#endif
+; Cargo's output folder. scripts\package.ps1 passes CARGO_TARGET_DIR when that is set.
+#ifndef TargetDir
+  #define TargetDir "..\target"
 #endif
 
 [Setup]
@@ -21,7 +25,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible 
 OutputDir=..\dist
 OutputBaseFilename=BootForge-Setup
-SetupIconFile=..\target\bootforge.ico
+SetupIconFile={#TargetDir}\bootforge.ico
 UninstallDisplayIcon={app}\BootForge.exe
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -37,7 +41,7 @@ VersionInfoDescription=BootForge Setup
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; 
 
 [Files]
-Source: "..\target\release\BootForge.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#TargetDir}\release\BootForge.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "..\NOTICE"; DestDir: "{app}"; DestName: "NOTICE.txt"; Flags: ignoreversion
 

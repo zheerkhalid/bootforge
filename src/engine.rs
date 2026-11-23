@@ -264,7 +264,8 @@ impl Reporter {
             .last_progress
             .map(|t| now.duration_since(t) >= Duration::from_millis(50))
             .unwrap_or(true);
-        if due || done >= total {
+        // With an unknown total (0) there is no "final value": rate-limit only.
+        if due || (total > 0 && done >= total) {
             self.last_progress = Some(now);
             self.send(Event::Progress { done, total });
         }
@@ -331,6 +332,8 @@ pub fn start(job: Job, policy: Policy, wake: impl Fn() + Send + 'static) -> JobH
     let cancel = Cancel::new();
     let c = cancel.clone();
     std::thread::spawn(move || {
+        // A PC that goes to sleep in the middle of a write leaves a broken drive.
+        let _awake = crate::sys::KeepAwake::new();
         let mut rep = Reporter::new(tx, Box::new(wake));
         let outcome = run::run_real(&job, &policy, &c, &mut rep);
         rep.send(Event::Finished(outcome));
@@ -425,6 +428,30 @@ mod tests {
         // Going backwards (a new stage) starts over.
         m.add(21.0, 5);
         assert_eq!(m.speed(), None);
+    }
+
+    #[test]
+    fn progress_is_rate_limited_but_the_final_value_always_arrives() {
+        let (mut rep, rx) = Reporter::collecting();
+        for i in 0..=1000u64 {
+            rep.progress(i, 1000);
+        }
+        let known: Vec<Event> = rx.try_iter().collect();
+        assert!(known.len() < 100, "{}", known.len());
+        assert_eq!(
+            known.last(),
+            Some(&Event::Progress {
+                done: 1000,
+                total: 1000
+            })
+        );
+        // An unknown total (an indeterminate bar) must not flood the window.
+        rep.stage(Stage::Formatting);
+        let _ = rx.try_iter().count();
+        for i in 0..1000u64 {
+            rep.progress(i, 0);
+        }
+        assert!(rx.try_iter().count() < 100);
     }
 
     #[test]

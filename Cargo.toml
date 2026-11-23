@@ -1,6 +1,6 @@
 [package]
 name = "bootforge"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "A careful bootable USB creator for Windows: writes ISO and disk images to USB drives"
 authors = ["Zheer Khalid (https://zheer.dev)"]
@@ -45,6 +45,7 @@ features = [
     "Win32_System_IO",
     "Win32_System_Ioctl",
     "Win32_System_LibraryLoader",
+    "Win32_System_Power",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",

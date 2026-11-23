@@ -72,6 +72,29 @@ optional bad-block check, which is destructive by nature).
 An `install.esd` over 4 GiB cannot be split by DISM; BootForge says so and does
 not offer file-copy mode for such an image.
 
+#### Windows Setup options
+
+For a Windows setup image (one with `sources\boot.wim` and a setup loader) the
+Create page offers three optional changes to how Setup behaves:
+
+| Option | What the answer file contains |
+| --- | --- |
+| Skip TPM, Secure Boot and RAM checks (Windows 11 images) | `windowsPE` pass: `reg add HKLM\SYSTEM\Setup\LabConfig` with `BypassTPMCheck`, `BypassSecureBootCheck` and `BypassRAMCheck` set to 1, before Setup examines the PC |
+| Local account, no Microsoft sign-in | `specialize` pass: `BypassNRO` = 1 under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE`; `oobeSystem` pass: `HideOnlineAccountScreens` = true |
+| Skip privacy questions | `oobeSystem` pass: `ProtectYourPC` = 3 |
+
+When at least one is ticked, BootForge writes `autounattend.xml` into the root
+of the drive next to the files of the image. Windows Setup looks for a file of
+that name on the media it starts from. Nothing inside the image is modified,
+no key, user name or password is put into the file, and deleting the file
+from the drive undoes all of it. The file is part of the verification pass.
+It is written for the CPU architecture of the image's UEFI loader (x64, ARM64
+or x86).
+
+An image that already has an `autounattend.xml` keeps it: the options are not
+offered, and the engine refuses rather than overwrite it. The options are
+remembered for the next Windows image.
+
 ## What the inspector reports
 
 When an image is chosen, BootForge reads only its directory structures (fast,
@@ -94,7 +117,12 @@ that cannot work, with the reason.
 ## Other tools
 
 - **Checksums**: MD5, SHA-1 and SHA-256 of any file in one pass, with a box to
-  paste a published checksum into for comparison.
+  paste a published checksum into for comparison. When the image's folder
+  holds a checksum file (`<image>.sha256`, `.sha256sum`, `.sha1`, `.md5`, or a
+  list such as `SHA256SUMS`, `sha256sum.txt`, `CHECKSUM`, `SHA1SUMS`,
+  `MD5SUMS`) that names the image, the listed value is filled in and the Create
+  page offers to check the image against it. Only small text files in the
+  image's own folder are read; nothing is downloaded.
 - **Back up a drive**: reads the whole drive into an image file (and prints its
   checksums). **Restore** is image mode with that file.
 - **Restore a drive to a normal empty drive**: wipe, one partition (MBR or GPT),
@@ -152,6 +180,9 @@ cancel alike.
 contents: BootForge says so, and "Restore a drive to a normal empty drive" makes
 it usable again.
 
+**Sleep.** While a job runs, BootForge asks Windows not to put the PC to sleep
+(`SetThreadExecutionState`); the request ends with the job.
+
 **Administrator rights** are needed for raw disk access. BootForge itself starts
 without them (so the checksum and inspection tools need no elevation) and
 restarts elevated when you ask it to write.
@@ -167,6 +198,12 @@ restarts elevated when you ask it to write.
   thin Windows layer that opens `\\.\PhysicalDriveN`, locks volumes and ejects
   the drive was compiled and reviewed but **never executed**. No drive produced
   by BootForge has been booted on a real computer yet.
+- **The Windows Setup options were not tried on a real installation.** The
+  answer file uses documented settings and the registry values Setup itself
+  reads, and tests check its structure and that it arrives on the drive
+  unchanged, but no Windows installation was run with it during development.
+  Microsoft changes Setup from release to release; an option that a future
+  Windows version ignores simply has no effect.
 - **File-copy mode is UEFI only.** Booting a BIOS/CSM machine from copied files
   needs a boot sector and boot loader that BootForge does not ship (see NOTICE).
   For BIOS booting use image mode with a hybrid ISO. Windows 7-era and other
@@ -209,6 +246,9 @@ BootForge.exe --selftest             write synthetic ISOs to image files, verify
         [--keep <folder>]            keep those image files for inspection
 BootForge.exe --inspect <file>       print what is known about an image
 BootForge.exe --hash <file>          MD5, SHA-1, SHA-256
+        [--expect <checksum>]        compare; exit code 2 when it does not match
+                                     (without it: a checksum file next to the file)
+BootForge.exe --version              print the version
 BootForge.exe --image <file> [--disk <n>]   open with an image (and a disk) preselected
 BootForge.exe --screenshot <png> [--view …] [--light]
 ```
@@ -244,6 +284,7 @@ been done.
 | `fat32`, `exfat` | formatters, FAT32 writer and consistency checker |
 | `imaging`, `hash` | raw write, verify, backup, bad-block check, checksums |
 | `plan` | advice: which mode, why, what blocks a write |
+| `unattend` | the Windows Setup answer file |
 | `engine` | jobs, stages, progress, the orchestration of all of the above |
 | `ui` | the egui interface |
 | `selftest`, `demo` | `--selftest`, invented data for `--demo` |

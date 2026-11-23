@@ -221,6 +221,7 @@ pub fn windows_image() -> ImageInfo {
         version: "10.0.26100".into(),
         over_4g: true,
         is_setup: true,
+        has_answer_file: false,
     });
     i.family = "Windows setup".into();
     i.file_count = 968;
@@ -287,6 +288,15 @@ pub fn disk_image() -> ImageInfo {
 }
 
 /// Checksums shown on the demo checksum page (of no real file).
+/// The recently used images shown on the empty Create page.
+pub fn recent_images() -> Vec<PathBuf> {
+    vec![
+        windows_image().path,
+        linux_image().path,
+        PathBuf::from("D:\\Images\\tern-rescue-12.1.iso"),
+    ]
+}
+
 pub fn checksums() -> Checksums {
     Checksums {
         md5: "5f2b1c0d9e8a7b6c4d3e2f1a0b9c8d7e".into(),

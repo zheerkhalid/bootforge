@@ -24,6 +24,9 @@ use windows::Win32::System::Console::{
     AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_HANDLE,
     STD_OUTPUT_HANDLE,
 };
+use windows::Win32::System::Power::{
+    SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED, EXECUTION_STATE,
+};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -433,6 +436,42 @@ pub fn dism_failure_message(code: Option<i32>, last_lines: &str) -> String {
 // Odds and ends
 // --------------------------------------------------------------------------------------
 
+/// Keeps Windows from putting the PC to sleep for as long as it lives (the
+/// screen may still switch off). It belongs to the thread that created it.
+pub struct KeepAwake {
+    /// False when Windows refused the request.
+    active: bool,
+}
+
+impl KeepAwake {
+    pub fn new() -> KeepAwake {
+        // SAFETY: plain flag-setting call without pointers.
+        let previous = unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) };
+        KeepAwake {
+            active: previous != EXECUTION_STATE(0),
+        }
+    }
+
+    pub fn active(&self) -> bool {
+        self.active
+    }
+}
+
+impl Default for KeepAwake {
+    fn default() -> Self {
+        KeepAwake::new()
+    }
+}
+
+impl Drop for KeepAwake {
+    fn drop(&mut self) {
+        // SAFETY: as above; back to the normal power behaviour.
+        unsafe {
+            SetThreadExecutionState(ES_CONTINUOUS);
+        }
+    }
+}
+
 /// Free bytes available to the user on the volume holding `dir`. When `dir`
 /// does not exist yet, its nearest existing parent is asked.
 pub fn free_space(dir: &Path) -> Option<u64> {
@@ -763,5 +802,18 @@ mod tests {
         if let Some(dism) = find_dism() {
             assert!(dism.is_file());
         }
+    }
+
+    #[test]
+    fn keep_awake_is_accepted_and_released() {
+        std::thread::spawn(|| {
+            let awake = KeepAwake::new();
+            assert!(awake.active());
+            drop(awake);
+            // Asking again after the release works the same way.
+            assert!(KeepAwake::default().active());
+        })
+        .join()
+        .unwrap();
     }
 }

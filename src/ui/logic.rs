@@ -237,6 +237,35 @@ pub fn verdict_text(v: HashVerdict) -> Option<(String, VerdictTone)> {
     }
 }
 
+/// How an image stands against the checksum published next to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PublishedCheck {
+    /// Found, not compared yet. The text invites to do so.
+    Found(String),
+    Checking(String),
+    Verified(String),
+    Failed(String),
+}
+
+/// `file`: name of the checksum file; `verdict`: the comparison, once the
+/// image's checksums are computed.
+pub fn published_check(file: &str, running: bool, verdict: Option<HashVerdict>) -> PublishedCheck {
+    match verdict {
+        _ if running => PublishedCheck::Checking(format!(
+            "Comparing the image with the checksum in {file}…"
+        )),
+        None | Some(HashVerdict::Empty) => PublishedCheck::Found(format!(
+            "{file} next to this image lists a checksum for it."
+        )),
+        Some(HashVerdict::Match(algo)) => PublishedCheck::Verified(format!(
+            "Checksum verified: the image matches the {algo} listed in {file}."
+        )),
+        Some(HashVerdict::Mismatch) | Some(HashVerdict::NotAHash) => PublishedCheck::Failed(format!(
+            "The image does not match the checksum listed in {file}. The download is probably damaged or incomplete: get it again before writing it."
+        )),
+    }
+}
+
 // --------------------------------------------------------------------------------------
 // Drive selection across refreshes
 // --------------------------------------------------------------------------------------
@@ -526,6 +555,27 @@ mod tests {
             verdict_text(HashVerdict::NotAHash).unwrap().1,
             VerdictTone::Muted
         );
+    }
+
+    #[test]
+    fn published_checksum_states() {
+        let found = published_check("SHA256SUMS", false, None);
+        assert!(matches!(&found, PublishedCheck::Found(t) if t.contains("SHA256SUMS")));
+        assert!(matches!(
+            published_check("SHA256SUMS", true, None),
+            PublishedCheck::Checking(_)
+        ));
+        // While a new computation runs, an old result is not shown as current.
+        assert!(matches!(
+            published_check("a.iso.md5", true, Some(HashVerdict::Mismatch)),
+            PublishedCheck::Checking(_)
+        ));
+        let ok = published_check("a.iso.sha256", false, Some(HashVerdict::Match("SHA-256")));
+        assert!(
+            matches!(&ok, PublishedCheck::Verified(t) if t.contains("SHA-256") && t.contains("a.iso.sha256"))
+        );
+        let bad = published_check("MD5SUMS", false, Some(HashVerdict::Mismatch));
+        assert!(matches!(&bad, PublishedCheck::Failed(t) if t.contains("does not match")));
     }
 
     #[test]

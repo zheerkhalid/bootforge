@@ -8,12 +8,14 @@ use super::{Job, Outcome, Reporter, ResetOptions, Stage, Summary};
 use crate::blockdev::{BlockDevice, FileSource, ReadAt, SubDevice};
 use crate::error::{Error, IoContext, Result};
 use crate::iso::IsoImage;
-use crate::model::{Cancel, Checksums, FileSystem, Scheme, TargetSystem, WriteMode, WriteOptions};
+use crate::model::{
+    Arch, Cancel, Checksums, FileSystem, Scheme, TargetSystem, WriteMode, WriteOptions,
+};
 use crate::part::{self, PartSpec, PartType};
 use crate::plan::{FAT32_MAX_FILE, SWM_PART_MB};
 use crate::safety::{self, Policy, Refusal};
 use crate::util::{human_duration, human_size, human_speed};
-use crate::{device, exfat, fat32, imaging, sys};
+use crate::{device, exfat, fat32, imaging, sys, unattend};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -287,6 +289,8 @@ pub struct FilesReport {
     pub bytes: u64,
     /// Number of .swm parts when install.wim was split, else 0.
     pub split_parts: usize,
+    /// An answer file with the chosen Windows Setup options was added.
+    pub answer_file: bool,
     pub partition_offset: u64,
     pub partition_size: u64,
     pub lines: Vec<String>,
@@ -298,6 +302,28 @@ enum Source {
     Iso(usize),
     /// A temporary file (a .swm part).
     Temp(PathBuf),
+    /// A file BootForge makes itself (the Windows Setup answer file).
+    Memory(Vec<u8>),
+}
+
+/// The CPU architectures an image has UEFI boot loaders for, from the names
+/// in `EFI/BOOT`.
+fn loader_archs(entries: &[crate::iso::Entry]) -> Vec<Arch> {
+    let mut archs = Vec::new();
+    for e in entries {
+        let p = e.path.to_ascii_lowercase();
+        let arch = match p.strip_prefix("efi/boot/") {
+            Some("bootx64.efi") => Arch::X64,
+            Some("bootia32.efi") => Arch::X86,
+            Some("bootaa64.efi") => Arch::Arm64,
+            _ => continue,
+        };
+        if !e.is_dir && !archs.contains(&arch) {
+            archs.push(arch);
+        }
+    }
+    archs.sort();
+    archs
 }
 
 struct Planned {
@@ -402,6 +428,35 @@ pub fn write_files(
             size: e.size,
             source: Source::Iso(i),
         });
+    }
+
+    // ---- Windows Setup options: an answer file next to the image's files --------
+    let mut answer_line = None;
+    if options.setup.any() {
+        let has = |path: &str| entries.iter().any(|e| e.path.eq_ignore_ascii_case(path));
+        if !has("sources/boot.wim") {
+            return Err(Error::Refused(
+                "the Windows Setup options need a Windows setup image".into(),
+            ));
+        }
+        if has(unattend::FILE_NAME) {
+            return Err(Error::Refused(format!(
+                "the image already has an {} of its own; switch the Windows Setup options off to keep it",
+                unattend::FILE_NAME
+            )));
+        }
+        if let Some(xml) = unattend::build(&options.setup, &loader_archs(entries)) {
+            answer_line = Some(format!(
+                "Added {}: Windows Setup will {}.",
+                unattend::FILE_NAME,
+                options.setup.describe().join(", ")
+            ));
+            planned.push(Planned {
+                path: unattend::FILE_NAME.into(),
+                size: xml.len() as u64,
+                source: Source::Memory(xml.into_bytes()),
+            });
+        }
     }
 
     // Rough size check before anything is touched (the exact one follows
@@ -598,6 +653,10 @@ pub fn write_files(
                     let mut f = std::fs::File::open(path).ctx("Could not open a split part")?;
                     writer.write_file(&p.path, p.size, &mut f, None, cancel, &mut progress)?;
                 }
+                Source::Memory(bytes) => {
+                    let mut data = std::io::Cursor::new(bytes);
+                    writer.write_file(&p.path, p.size, &mut data, None, cancel, &mut progress)?;
+                }
             }
             base += p.size;
         }
@@ -618,6 +677,11 @@ pub fn write_files(
     );
     rep.log(line.clone());
     report.lines.push(line);
+    if let Some(line) = answer_line {
+        rep.log(line.clone());
+        report.lines.push(line);
+        report.answer_file = true;
+    }
 
     // ---- verify ------------------------------------------------------------------------
     if options.verify {
@@ -670,6 +734,10 @@ pub fn write_files(
                 }
                 Source::Temp(path) => {
                     let mut src = std::fs::File::open(path).ctx("Could not open a split part")?;
+                    streams_equal(&mut src, &mut on_drive, p.size, cancel, &mut count)?
+                }
+                Source::Memory(bytes) => {
+                    let mut src = std::io::Cursor::new(bytes);
                     streams_equal(&mut src, &mut on_drive, p.size, cancel, &mut count)?
                 }
             };
@@ -1129,6 +1197,100 @@ mod tests {
         let fs = fat32::check(&mut vol).unwrap();
         assert!(fs.problems.is_empty(), "{:?}", fs.problems);
         assert_eq!(fs.label, "TEST");
+    }
+
+    fn windows_like_iso(with_answer_file: bool) -> Vec<u8> {
+        let mut b = build::IsoBuilder::new("WINSETUP")
+            .udf(true)
+            .file(
+                "efi/boot/bootx64.efi",
+                build::fake_efi_binary(crate::model::Arch::X64),
+            )
+            .file("bootmgr", build::pattern(3000, 5, 1))
+            .file("sources/boot.wim", build::pattern(70_000, 9, 2))
+            .file("sources/install.wim", build::pattern(200_000, 11, 3));
+        if with_answer_file {
+            b = b.file("autounattend.xml", b"<unattend/>".to_vec());
+        }
+        b.build()
+    }
+
+    #[test]
+    fn windows_setup_options_add_an_answer_file_that_reads_back() {
+        let iso = IsoImage::open(Box::new(MemSource(windows_like_iso(false)))).unwrap();
+        let (mut rep, _rx) = Reporter::collecting();
+        let mut o = files_options();
+        o.setup.skip_requirements = true;
+        o.setup.local_account = true;
+        let mut dev = MemDevice::new(64 * MIB, 512);
+        let report = write_files(&iso, &mut dev, &o, &params(), &Cancel::new(), &mut rep).unwrap();
+        assert!(report.answer_file);
+        assert!(report
+            .lines
+            .iter()
+            .any(|l| l.contains("autounattend.xml") && l.contains("local account")));
+        // One file more than the image holds, and it was part of the verification.
+        let in_image = iso.entries().iter().filter(|e| !e.is_dir).count() as u64;
+        assert_eq!(report.files, in_image + 1);
+        assert!(report
+            .lines
+            .iter()
+            .any(|l| l.contains(&format!("all {} files read back identical", in_image + 1))));
+        let mut vol =
+            SubDevice::new(&mut dev, report.partition_offset, report.partition_size).unwrap();
+        let on_drive = fat32::read_file(&mut vol, "autounattend.xml").unwrap();
+        let expected = unattend::build(&o.setup, &[Arch::X64]).unwrap();
+        assert_eq!(on_drive, expected.as_bytes());
+        assert!(fat32::check(&mut vol).unwrap().problems.is_empty());
+
+        // Without options the drive holds exactly the image's files.
+        let mut dev = MemDevice::new(64 * MIB, 512);
+        let report = write_files(
+            &iso,
+            &mut dev,
+            &files_options(),
+            &params(),
+            &Cancel::new(),
+            &mut rep,
+        )
+        .unwrap();
+        assert!(!report.answer_file);
+        assert_eq!(report.files, in_image);
+        let mut vol =
+            SubDevice::new(&mut dev, report.partition_offset, report.partition_size).unwrap();
+        assert!(fat32::read_file(&mut vol, "autounattend.xml").is_err());
+    }
+
+    #[test]
+    fn windows_setup_options_are_refused_where_they_cannot_apply() {
+        let (mut rep, _rx) = Reporter::collecting();
+        let mut o = files_options();
+        o.setup.skip_privacy = true;
+        for image in [
+            // Not a Windows setup image.
+            build::sample_linux_hybrid(),
+            // An image that brings its own answer file keeps it.
+            windows_like_iso(true),
+        ] {
+            let iso = IsoImage::open(Box::new(MemSource(image))).unwrap();
+            let mut dev = MemDevice::new(320 * MIB, 512);
+            let r = write_files(&iso, &mut dev, &o, &params(), &Cancel::new(), &mut rep);
+            assert!(matches!(r, Err(Error::Refused(_))), "{r:?}");
+            assert_eq!(dev.writes, 0);
+        }
+    }
+
+    #[test]
+    fn loader_names_give_the_architectures() {
+        let iso = IsoImage::open(Box::new(MemSource(windows_like_iso(false)))).unwrap();
+        assert_eq!(loader_archs(iso.entries()), [Arch::X64]);
+        let image = build::IsoBuilder::new("MULTI")
+            .file("EFI/BOOT/BOOTAA64.EFI", build::fake_efi_binary(Arch::Arm64))
+            .file("EFI/BOOT/BOOTIA32.EFI", build::fake_efi_binary(Arch::X86))
+            .file("EFI/BOOT/grub.cfg", vec![1])
+            .build();
+        let iso = IsoImage::open(Box::new(MemSource(image))).unwrap();
+        assert_eq!(loader_archs(iso.entries()), [Arch::X86, Arch::Arm64]);
     }
 
     #[test]

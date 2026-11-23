@@ -1,5 +1,6 @@
 //! User settings, stored as JSON in `%LOCALAPPDATA%\BootForge\settings.json`.
 
+use crate::model::SetupTweaks;
 use crate::safety::Policy;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -27,7 +28,15 @@ pub struct Settings {
     pub save_logs: bool,
     /// Folder the image picker opens in.
     pub last_image_dir: Option<PathBuf>,
+    /// The Windows Setup changes chosen last time (offered again for the next
+    /// Windows image).
+    pub setup: SetupTweaks,
+    /// The images chosen most recently, newest first.
+    pub recent_images: Vec<PathBuf>,
 }
+
+/// How many recently used images are remembered.
+pub const RECENT_MAX: usize = 5;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -39,6 +48,8 @@ impl Default for Settings {
             quick_format: true,
             save_logs: true,
             last_image_dir: None,
+            setup: SetupTweaks::default(),
+            recent_images: Vec::new(),
         }
     }
 }
@@ -52,6 +63,26 @@ pub fn app_dir() -> PathBuf {
 }
 
 impl Settings {
+    /// Puts `path` at the front of the recent images (once, compared without
+    /// regard to case) and keeps the list at [`RECENT_MAX`] entries. Returns
+    /// whether the list changed.
+    pub fn remember_image(&mut self, path: &Path) -> bool {
+        if self.recent_images.first().map(|p| p.as_path()) == Some(path) {
+            return false;
+        }
+        let key = path.to_string_lossy().to_lowercase();
+        self.recent_images
+            .retain(|p| p.to_string_lossy().to_lowercase() != key);
+        self.recent_images.insert(0, path.to_path_buf());
+        self.recent_images.truncate(RECENT_MAX);
+        true
+    }
+
+    /// Drops `path` from the recent images (it no longer exists).
+    pub fn forget_image(&mut self, path: &Path) {
+        self.recent_images.retain(|p| p != path);
+    }
+
     pub fn load(dir: &Path) -> Settings {
         std::fs::read_to_string(dir.join("settings.json"))
             .ok()
@@ -100,9 +131,36 @@ mod tests {
     }
 
     #[test]
+    fn recent_images_are_unique_newest_first_and_capped() {
+        let mut s = Settings::default();
+        for i in 0..7 {
+            assert!(s.remember_image(Path::new(&format!("D:\\img\\{i}.iso"))));
+        }
+        assert_eq!(s.recent_images.len(), RECENT_MAX);
+        assert_eq!(s.recent_images[0], Path::new("D:\\img\\6.iso"));
+        // Choosing the newest again changes nothing; an older one moves up
+        // without being listed twice, whatever its spelling.
+        assert!(!s.remember_image(Path::new("D:\\img\\6.iso")));
+        assert!(s.remember_image(Path::new("d:\\IMG\\4.iso")));
+        assert_eq!(s.recent_images.len(), RECENT_MAX);
+        assert_eq!(s.recent_images[0], Path::new("d:\\IMG\\4.iso"));
+        assert_eq!(s.recent_images[1], Path::new("D:\\img\\6.iso"));
+        s.forget_image(Path::new("D:\\img\\6.iso"));
+        assert_eq!(s.recent_images.len(), RECENT_MAX - 1);
+        // Remembered choices survive a round trip.
+        s.setup.local_account = true;
+        let dir = std::env::temp_dir().join(format!("bootforge-recent-{}", std::process::id()));
+        s.save(&dir).unwrap();
+        assert_eq!(Settings::load(&dir), s);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn safe_defaults() {
         let s = Settings::default();
         assert!(!s.policy.show_usb_hdd);
         assert!(s.verify);
+        // Windows Setup is left alone unless the user asks.
+        assert!(!s.setup.any());
     }
 }

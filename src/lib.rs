@@ -22,4 +22,5 @@ pub mod selftest;
 pub mod settings;
 pub mod sys;
 pub mod ui;
+pub mod unattend;
 pub mod util;

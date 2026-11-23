@@ -2,7 +2,8 @@
 //! possible, which one is recommended and why, and what would stop a write.
 
 use crate::model::{
-    Arch, Disk, FileSystem, ImageInfo, ImageKind, Scheme, TargetSystem, WriteMode, WriteOptions,
+    Arch, Disk, FileSystem, ImageInfo, ImageKind, Scheme, SetupTweaks, TargetSystem, WriteMode,
+    WriteOptions,
 };
 use crate::settings::Settings;
 use crate::util::human_size;
@@ -31,6 +32,55 @@ pub enum WimPlan {
     EsdTooBig,
     /// Would need splitting, but DISM is not available.
     NoDism,
+}
+
+/// Whether the Windows Setup options (an added answer file) can be offered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TweakSupport {
+    /// Not a Windows setup image.
+    NotWindows,
+    /// A Windows setup image. `windows11`: the hardware requirement checks
+    /// exist in it (or its version could not be read).
+    Available { windows11: bool },
+    /// The image brings an `autounattend.xml` of its own, which is kept.
+    OwnAnswerFile,
+}
+
+impl TweakSupport {
+    pub fn available(self) -> bool {
+        matches!(self, TweakSupport::Available { .. })
+    }
+}
+
+/// Whether a Windows image is Windows 11 or later (true when unknown, so the
+/// option is not withheld from an image whose details could not be read).
+fn is_windows11(w: &crate::model::WindowsInfo) -> bool {
+    if w.editions.iter().any(|e| e.contains("Windows 11")) {
+        return true;
+    }
+    if w.editions.iter().any(|e| e.contains("Windows 10")) {
+        return false;
+    }
+    match w
+        .version
+        .split('.')
+        .nth(2)
+        .and_then(|b| b.parse::<u32>().ok())
+    {
+        Some(build) => build >= 22000,
+        None => true,
+    }
+}
+
+/// Removes choices the image cannot honour.
+pub fn usable_tweaks(support: TweakSupport, mode: WriteMode, tweaks: SetupTweaks) -> SetupTweaks {
+    match (support, mode) {
+        (TweakSupport::Available { windows11 }, WriteMode::Files) => SetupTweaks {
+            skip_requirements: tweaks.skip_requirements && windows11,
+            ..tweaks
+        },
+        _ => SetupTweaks::default(),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +119,8 @@ pub struct Advice {
     pub image_boots_bios: bool,
     /// Suggested FAT32 volume label for file-copy mode.
     pub default_label: String,
+    /// Whether the Windows Setup options can be offered in file-copy mode.
+    pub setup_tweaks: TweakSupport,
     pub warnings: Vec<String>,
 }
 
@@ -379,6 +431,14 @@ pub fn advise(info: &ImageInfo, env: &Env) -> Advice {
     }
     warnings.extend(info.notes.iter().cloned());
 
+    let setup_tweaks = match &info.windows {
+        Some(w) if w.is_setup && w.has_answer_file => TweakSupport::OwnAnswerFile,
+        Some(w) if w.is_setup => TweakSupport::Available {
+            windows11: is_windows11(w),
+        },
+        _ => TweakSupport::NotWindows,
+    };
+
     Advice {
         headline,
         badges,
@@ -391,6 +451,7 @@ pub fn advise(info: &ImageInfo, env: &Env) -> Advice {
         image_boots_uefi,
         image_boots_bios,
         default_label,
+        setup_tweaks,
         warnings,
     }
 }
@@ -409,6 +470,7 @@ pub fn default_options(advice: &Advice, settings: &Settings) -> WriteOptions {
         bad_block_check: false,
         verify: settings.verify,
         eject: settings.eject,
+        setup: usable_tweaks(advice.setup_tweaks, mode, settings.setup),
     }
 }
 
@@ -561,6 +623,7 @@ mod tests {
             version: "10.0.26100".into(),
             over_4g: install_size > FAT32_MAX_FILE,
             is_setup: true,
+            has_answer_file: false,
         });
         i.file_count = 950;
         i.total_file_bytes = install_size + 800 * MIB;
@@ -687,6 +750,61 @@ mod tests {
         let mut o = default_options(&a, &Settings::default());
         o.mode = WriteMode::Image;
         assert!(check_options(&win, &a, &o, None).iter().any(|i| i.blocking));
+    }
+
+    #[test]
+    fn windows_setup_options_are_offered_only_where_they_work() {
+        let all = SetupTweaks {
+            skip_requirements: true,
+            local_account: true,
+            skip_privacy: true,
+        };
+        // Windows 11 setup image: everything.
+        let a = advise(&windows(3000 * MIB, false), &DISM);
+        assert_eq!(a.setup_tweaks, TweakSupport::Available { windows11: true });
+        assert_eq!(usable_tweaks(a.setup_tweaks, WriteMode::Files, all), all);
+        // The answer file only exists on a file copy.
+        assert!(!usable_tweaks(a.setup_tweaks, WriteMode::Image, all).any());
+        // Remembered choices become the defaults of the next Windows image.
+        let settings = Settings {
+            setup: all,
+            ..Settings::default()
+        };
+        assert_eq!(default_options(&a, &settings).setup, all);
+        assert!(!default_options(&a, &Settings::default()).setup.any());
+
+        // Windows 10 has no requirement checks to skip.
+        let mut ten = windows(3000 * MIB, false);
+        let w = ten.windows.as_mut().unwrap();
+        w.editions = vec!["Windows 10 Pro".into()];
+        w.version = "10.0.19045".into();
+        let a = advise(&ten, &DISM);
+        assert_eq!(a.setup_tweaks, TweakSupport::Available { windows11: false });
+        let t = usable_tweaks(a.setup_tweaks, WriteMode::Files, all);
+        assert!(!t.skip_requirements && t.local_account && t.skip_privacy);
+        // Without edition names the build number decides; unknown counts as 11.
+        let w = ten.windows.as_mut().unwrap();
+        w.editions.clear();
+        assert!(!is_windows11(w));
+        w.version = "10.0.22631".into();
+        assert!(is_windows11(w));
+        w.version.clear();
+        assert!(is_windows11(w));
+
+        // An image with its own answer file keeps it.
+        let mut own = windows(3000 * MIB, false);
+        own.windows.as_mut().unwrap().has_answer_file = true;
+        let a = advise(&own, &DISM);
+        assert_eq!(a.setup_tweaks, TweakSupport::OwnAnswerFile);
+        assert!(!default_options(&a, &settings).setup.any());
+
+        // Linux images and recovery discs are not offered any of it.
+        let a = advise(&linux_hybrid(), &DISM);
+        assert_eq!(a.setup_tweaks, TweakSupport::NotWindows);
+        assert!(!default_options(&a, &settings).setup.any());
+        let mut pe = windows(3000 * MIB, false);
+        pe.windows.as_mut().unwrap().is_setup = false;
+        assert_eq!(advise(&pe, &DISM).setup_tweaks, TweakSupport::NotWindows);
     }
 
     #[test]

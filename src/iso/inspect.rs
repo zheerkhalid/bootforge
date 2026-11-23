@@ -328,6 +328,7 @@ fn fill_from_iso(info: &mut ImageInfo, image: &IsoImage) {
                 && ["bootmgr", "bootmgr.efi", "setup.exe"]
                     .into_iter()
                     .any(|p| find_file(image, p).is_some()),
+            has_answer_file: find_file(image, "autounattend.xml").is_some(),
         };
         match read_wim(image, e) {
             Ok(meta) => {

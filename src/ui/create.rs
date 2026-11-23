@@ -6,13 +6,14 @@ use super::parts::{self, DriveAction, DriveList};
 use super::theme::{pal, pal_ctx, regular, semibold, Icon};
 use super::widgets;
 use crate::engine::Job;
-use crate::model::{Disk, FileSystem, Scheme, TargetSystem, WriteMode, WriteOptions};
-use crate::plan::{self, Issue};
+use crate::model::{Disk, FileSystem, Scheme, SetupTweaks, TargetSystem, WriteMode, WriteOptions};
+use crate::plan::{self, Issue, TweakSupport};
 use crate::safety::Listed;
 use eframe::egui::{
     self, vec2, Align, Align2, CornerRadius, Frame, Layout, Margin, RichText, Sense, Stroke, Ui,
     Vec2,
 };
+use std::path::PathBuf;
 
 /// Paints "label   value" with a fixed label column; the value wraps.
 pub(super) fn fact_row(ui: &mut Ui, label: &str, value: &str) {
@@ -101,6 +102,8 @@ impl App {
         let disk = logic::selected_disk(&self.create_disk, &listed)?.clone();
         let mut options = self.opts.clone();
         options.label = logic::final_label(&options.label, options.fs);
+        options.setup =
+            plan::usable_tweaks(loaded.advice.setup_tweaks, options.mode, options.setup);
         Some((
             Job::Write {
                 info: loaded.info.clone(),
@@ -114,6 +117,16 @@ impl App {
     /// Opens the erase confirmation for the current selection.
     pub(super) fn request_write(&mut self) {
         if let Some((job, disk)) = self.build_write_job() {
+            // The Windows Setup choices are offered again for the next Windows image.
+            let offered = self
+                .image
+                .loaded()
+                .map(|l| l.advice.setup_tweaks.available() && self.opts.mode == WriteMode::Files)
+                .unwrap_or(false);
+            if offered && self.settings.setup != self.opts.setup {
+                self.settings.setup = self.opts.setup;
+                self.save_settings();
+            }
             self.request_job(job, disk);
         }
     }
@@ -160,6 +173,14 @@ impl App {
         let ctx = ui.ctx().clone();
         let mut choose = false;
         let mut checksums = false;
+        let mut reopen: Option<PathBuf> = None;
+        let mut verify_now = false;
+        let published = self.published_check();
+        let recent: Vec<PathBuf> = if self.demo {
+            crate::demo::recent_images()
+        } else {
+            self.settings.recent_images.clone()
+        };
         widgets::card(ui, |ui| match &self.image {
             ImageSlot::Empty => {
                 parts::numbered_title(ui, 1, "Image");
@@ -199,6 +220,36 @@ impl App {
                     })
                     .response;
                 parts::dashed_border(ui, zone.rect, p.faint.gamma_multiply(0.8));
+                if !recent.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Recent images").size(12.5).color(p.muted));
+                    ui.scope(|ui| {
+                        ui.spacing_mut().item_spacing.y = 3.0;
+                        for path in &recent {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(Icon::DISC.glyph()).size(13.0).color(p.faint),
+                                );
+                                if parts::link(ui, &logic::file_name(path))
+                                    .on_hover_text(path.display().to_string())
+                                    .clicked()
+                                {
+                                    reopen = Some(path.clone());
+                                }
+                                let folder = path
+                                    .parent()
+                                    .map(|d| d.display().to_string())
+                                    .unwrap_or_default();
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(folder).size(12.0).color(p.faint),
+                                    )
+                                    .truncate(),
+                                );
+                            });
+                        }
+                    });
+                }
             }
             ImageSlot::Inspecting(path) => {
                 parts::numbered_title(ui, 1, "Image");
@@ -249,14 +300,65 @@ impl App {
                     });
                 });
                 image_summary(ui, loaded, true);
+                match &published {
+                    None => {}
+                    Some(logic::PublishedCheck::Found(text)) => {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(Icon::FINGERPRINT.glyph()).color(p.info));
+                            ui.add(
+                                egui::Label::new(RichText::new(text).size(13.0).color(p.muted))
+                                    .truncate(),
+                            );
+                        });
+                        if parts::link(ui, "Check the image against it now").clicked() {
+                            verify_now = true;
+                        }
+                    }
+                    Some(logic::PublishedCheck::Checking(text)) => {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(14.0).color(p.accent));
+                            ui.label(RichText::new(text).size(13.0).color(p.muted));
+                        });
+                    }
+                    Some(logic::PublishedCheck::Verified(text)) => {
+                        parts::note(ui, Icon::DONE, p.accent, text)
+                    }
+                    Some(logic::PublishedCheck::Failed(text)) => {
+                        parts::note(ui, Icon::ERROR, p.danger, text)
+                    }
+                }
             }
         });
         if choose {
             self.choose_image(&ctx, Slot::Create);
         }
+        if let Some(path) = reopen {
+            self.open_recent(&ctx, path);
+        }
+        if verify_now {
+            self.start_hash(&ctx);
+        }
         if checksums {
             self.tab = Tab::Checksums;
         }
+    }
+
+    /// Selects an image from the recent list; one that is gone is dropped
+    /// from the list instead.
+    fn open_recent(&mut self, ctx: &egui::Context, path: PathBuf) {
+        if self.demo || path.is_file() {
+            self.set_image(ctx, Slot::Create, path);
+            return;
+        }
+        self.settings.forget_image(&path);
+        self.save_settings();
+        self.toast(
+            format!(
+                "{} is no longer there; it was removed from the recent images.",
+                logic::file_name(&path)
+            ),
+            true,
+        );
     }
 
     fn drive_card(&mut self, ui: &mut Ui, listed: &[Listed], hidden: usize) {
@@ -373,6 +475,10 @@ impl App {
                         "The image brings its own partition table and file system, so there is nothing to format.",
                     );
                 }
+            }
+
+            if opts.mode == WriteMode::Files {
+                setup_options(ui, advice.setup_tweaks, &mut opts.setup);
             }
 
             ui.add_space(2.0);
@@ -589,6 +695,89 @@ fn files_options(ui: &mut Ui, opts: &mut WriteOptions) {
             );
         });
     });
+}
+
+/// A switch with a short state text next to it, as tall as the other fields.
+fn switch_field(ui: &mut Ui, value: &mut bool, enabled: bool, state: &str, hover: &str) {
+    let p = pal(ui);
+    ui.horizontal(|ui| {
+        ui.set_height(30.0);
+        if widgets::toggle(ui, *value && enabled, enabled).clicked() {
+            *value = !*value;
+        }
+        ui.label(RichText::new(state).size(12.5).color(p.muted));
+    })
+    .response
+    .on_hover_text(hover);
+}
+
+/// The Windows Setup choices of file-copy mode (shown for Windows setup images only).
+fn setup_options(ui: &mut Ui, support: TweakSupport, tweaks: &mut SetupTweaks) {
+    match support {
+        TweakSupport::NotWindows => {}
+        TweakSupport::OwnAnswerFile => hint_line(
+            ui,
+            "Windows Setup options are not offered: this image brings its own answer file (autounattend.xml), which is copied as it is.",
+        ),
+        TweakSupport::Available { windows11 } => {
+            let w = ui.available_width();
+            let gap = 14.0;
+            let c1 = 136.0_f32;
+            let c2 = 190.0_f32;
+            let c3 = (w - c1 - c2 - 2.0 * gap).max(110.0);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                column(ui, c1, "Windows 11 checks", |ui| {
+                    let state = match (windows11, tweaks.skip_requirements) {
+                        (false, _) => "Not in this image",
+                        (true, true) => "Skipped",
+                        (true, false) => "Kept",
+                    };
+                    switch_field(
+                        ui,
+                        &mut tweaks.skip_requirements,
+                        windows11,
+                        state,
+                        "Skip the TPM 2.0, Secure Boot and 4 GB memory checks, so that Windows 11 Setup continues on a PC that does not meet them.",
+                    );
+                });
+                column(ui, c2, "Local account", |ui| {
+                    let state = if tweaks.local_account {
+                        "No Microsoft sign-in"
+                    } else {
+                        "As Setup asks"
+                    };
+                    switch_field(
+                        ui,
+                        &mut tweaks.local_account,
+                        true,
+                        state,
+                        "The first start asks for a local user name instead of a Microsoft account, and works without an internet connection.",
+                    );
+                });
+                column(ui, c3, "Privacy questions", |ui| {
+                    let state = if tweaks.skip_privacy {
+                        "Skipped, all off"
+                    } else {
+                        "Asked"
+                    };
+                    switch_field(
+                        ui,
+                        &mut tweaks.skip_privacy,
+                        true,
+                        state,
+                        "The questions about location, diagnostics and advertising are not shown; all of them are answered with \"no\".",
+                    );
+                });
+            });
+            if tweaks.any() {
+                hint_line(
+                    ui,
+                    "Windows Setup: adds a small answer file (autounattend.xml) to the drive. The files of the image are not changed; delete that file to get the plain Setup back.",
+                );
+            }
+        }
+    }
 }
 
 /// One line of muted text, cut with an ellipsis; the whole text shows on hover.

@@ -157,7 +157,7 @@ pub fn run(options: Options, icon: egui::IconData) -> eframe::Result<()> {
         } else {
             "BootForge"
         })
-        .with_inner_size([1280.0, 800.0])
+        .with_inner_size([1280.0, 860.0])
         .with_min_inner_size([980.0, 620.0])
         .with_drag_and_drop(true)
         .with_icon(icon.clone());
@@ -237,7 +237,7 @@ impl App {
             create_disk: None,
             inspect_gen: [0; 2],
             demo_cycle: 0,
-            hash: HashState::default(),
+            hash: HashState::new(!options.demo),
             pending: None,
             running: None,
             closing: None,
@@ -438,6 +438,9 @@ impl App {
                     ));
                 }
                 if slot == Slot::Create {
+                    if !self.demo && self.settings.remember_image(&loaded.info.path) {
+                        self.save_settings();
+                    }
                     self.opts = plan::default_options(&loaded.advice, &self.settings);
                     self.hash
                         .set_file(loaded.info.path.clone(), Some(loaded.info.size));
@@ -724,8 +727,8 @@ impl App {
             ctx.set_pixels_per_point(1.0);
         }
         if shot.frames == 3 {
-            // Now that one point is one pixel, this gives an exact 1280 x 800 image.
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(1280.0, 800.0)));
+            // Now that one point is one pixel, this gives an exact 1280 x 860 image.
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(1280.0, 860.0)));
         }
         let image = ctx.input(|i| {
             i.events.iter().find_map(|e| match e {

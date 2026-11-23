@@ -12,7 +12,7 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Chunk size used by [`hash_file`].
 const CHUNK: usize = 1024 * 1024;
@@ -182,10 +182,212 @@ pub fn compare(pasted: &str, sums: &Checksums) -> HashMatch {
     HashMatch::Mismatch
 }
 
+// --------------------------------------------------------------------------------------
+// Checksum files next to an image
+// --------------------------------------------------------------------------------------
+
+/// A checksum found in a checksum file that sits next to an image.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sidecar {
+    /// The checksum file.
+    pub file: PathBuf,
+    /// The checksum listed for the image, lower-case hex.
+    pub digest: String,
+}
+
+/// Checksum files larger than this are not read (real ones are a few lines).
+const SIDECAR_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Lists that name several files, as distributions publish them.
+const LIST_NAMES: [&str; 10] = [
+    "SHA256SUMS",
+    "SHA256SUMS.txt",
+    "sha256sum.txt",
+    "sha256sums.txt",
+    "CHECKSUM",
+    "CHECKSUMS",
+    "checksums.txt",
+    "SHA1SUMS",
+    "MD5SUMS",
+    "md5sum.txt",
+];
+
+/// Extensions of a checksum file that belongs to one image (`image.iso.sha256`).
+const OWN_EXTENSIONS: [&str; 6] = ["sha256", "sha256sum", "sha256.txt", "sha1", "md5", "md5sum"];
+
+/// The file name at the end of a path written with either kind of slash.
+fn base_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// The checksum a checksum file lists for `file_name`.
+///
+/// Understands `sha256sum` style lines (`<hash>  name`, `<hash> *name`, with
+/// or without a folder in front of the name) and the BSD style
+/// (`SHA256 (name) = <hash>`). With `single_ok`, a file that holds exactly
+/// one checksum and names no file at all is taken to be about `file_name`.
+pub fn expected_in(text: &str, file_name: &str, single_ok: bool) -> Option<String> {
+    let mut lone: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // BSD style: "SHA256 (name) = hash".
+        if let (Some(open), Some(close)) = (line.find('('), line.rfind(')')) {
+            if open < close && algorithm_name(line[..open].trim()).is_some() {
+                let name = base_name(line[open + 1..close].trim());
+                let digest = line[close + 1..].trim().trim_start_matches('=').trim();
+                if is_hash_len(digest.len()) && digest.chars().all(|c| c.is_ascii_hexdigit()) {
+                    if name.eq_ignore_ascii_case(file_name) {
+                        return Some(digest.to_ascii_lowercase());
+                    }
+                    continue;
+                }
+            }
+        }
+        // sha256sum style: "hash  name" / "hash *name"; a bare hash names nothing.
+        let (digest, rest) = match line.split_once(char::is_whitespace) {
+            Some((d, r)) => (d, r.trim()),
+            None => (line, ""),
+        };
+        if !is_hash_len(digest.len()) || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        if rest.is_empty() {
+            lone.push(digest.to_ascii_lowercase());
+        } else if base_name(rest.trim_start_matches('*')).eq_ignore_ascii_case(file_name) {
+            return Some(digest.to_ascii_lowercase());
+        }
+    }
+    if single_ok && lone.len() == 1 {
+        return lone.pop();
+    }
+    None
+}
+
+fn read_small(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > SIDECAR_MAX_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Looks next to `image` for a checksum file that lists it: first a file of
+/// its own (`image.iso.sha256`, ...), then the usual lists (`SHA256SUMS`, ...).
+/// Only small text files in the image's own folder are read.
+pub fn find_sidecar(image: &Path) -> Option<Sidecar> {
+    let dir = image.parent()?;
+    let name = image.file_name()?.to_string_lossy().into_owned();
+    for ext in OWN_EXTENSIONS {
+        let file = dir.join(format!("{name}.{ext}"));
+        if let Some(digest) = read_small(&file).and_then(|t| expected_in(&t, &name, true)) {
+            return Some(Sidecar { file, digest });
+        }
+    }
+    for list in LIST_NAMES {
+        let file = dir.join(list);
+        if let Some(digest) = read_small(&file).and_then(|t| expected_in(&t, &name, false)) {
+            return Some(Sidecar { file, digest });
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::error::Error;
+
+    #[test]
+    fn checksum_lists_are_searched_for_the_file_name() {
+        let list = format!(
+            "# release 24.04\n{ABC_SHA256} *other.iso\n{EMPTY_SHA256}  nimbus-24.04.iso\n{ABC_SHA1}  ./pool/third.iso\n"
+        );
+        assert_eq!(
+            expected_in(&list, "nimbus-24.04.iso", false).as_deref(),
+            Some(EMPTY_SHA256)
+        );
+        // Binary marker, folders in front of the name and letter case do not matter.
+        assert_eq!(
+            expected_in(&list, "OTHER.ISO", false).as_deref(),
+            Some(ABC_SHA256)
+        );
+        assert_eq!(
+            expected_in(&list, "third.iso", false).as_deref(),
+            Some(ABC_SHA1)
+        );
+        assert_eq!(expected_in(&list, "missing.iso", false), None);
+        // A name that merely ends the same is another file.
+        assert_eq!(expected_in(&list, "04.iso", false), None);
+
+        let bsd = format!(
+            "SHA256 (a.iso) = {ABC_SHA256}\nMD5 (b.iso) = {}\n",
+            ABC_MD5.to_uppercase()
+        );
+        assert_eq!(
+            expected_in(&bsd, "a.iso", false).as_deref(),
+            Some(ABC_SHA256)
+        );
+        assert_eq!(expected_in(&bsd, "b.iso", true).as_deref(), Some(ABC_MD5));
+        assert_eq!(expected_in(&bsd, "c.iso", true), None);
+
+        // A file with one bare checksum is about its image, but only when asked
+        // for (a list never is) and only when it is unambiguous.
+        let bare = format!("\u{feff}{ABC_SHA256}\r\n");
+        assert_eq!(
+            expected_in(&bare, "x.iso", true).as_deref(),
+            Some(ABC_SHA256)
+        );
+        assert_eq!(expected_in(&bare, "x.iso", false), None);
+        let two = format!("{ABC_SHA256}\n{EMPTY_SHA256}\n");
+        assert_eq!(expected_in(&two, "x.iso", true), None);
+        // Not checksums at all.
+        assert_eq!(
+            expected_in("hello world\nabc123  x.iso\n", "x.iso", true),
+            None
+        );
+    }
+
+    #[test]
+    fn sidecar_files_are_found_next_to_the_image() {
+        let dir = std::env::temp_dir().join(format!("bootforge-sidecar-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("nimbus.iso");
+        std::fs::write(&image, b"abc").unwrap();
+        assert_eq!(find_sidecar(&image), None);
+
+        // A list that names the image.
+        let list = dir.join("SHA256SUMS");
+        std::fs::write(
+            &list,
+            format!("{EMPTY_SHA256}  else.iso\n{ABC_SHA256} *nimbus.iso\n"),
+        )
+        .unwrap();
+        let found = find_sidecar(&image).unwrap();
+        assert_eq!(found.digest, ABC_SHA256);
+        assert_eq!(found.file, list);
+        // The checksum really is the file's: the comparison says so.
+        let sums = hash_file(&image, &Cancel::new(), &mut |_| {}).unwrap();
+        assert_eq!(compare(&found.digest, &sums), HashMatch::Sha256);
+
+        // The image's own checksum file wins over the list.
+        let own = dir.join("nimbus.iso.md5");
+        std::fs::write(&own, ABC_MD5).unwrap();
+        let found = find_sidecar(&image).unwrap();
+        assert_eq!(found.digest, ABC_MD5);
+        assert_eq!(found.file, own);
+
+        // A list that does not mention the image is ignored, as is a huge file.
+        std::fs::remove_file(&own).unwrap();
+        std::fs::write(&list, format!("{EMPTY_SHA256}  else.iso\n")).unwrap();
+        assert_eq!(find_sidecar(&image), None);
+        std::fs::write(&list, vec![b'a'; SIDECAR_MAX_BYTES as usize + 1]).unwrap();
+        assert_eq!(find_sidecar(&image), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     const EMPTY_MD5: &str = "d41d8cd98f00b204e9800998ecf8427e";
     const EMPTY_SHA1: &str = "da39a3ee5e6b4b0d3255bfef95601890afd80709";

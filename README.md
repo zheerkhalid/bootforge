@@ -21,7 +21,7 @@ Pick an image, pick a drive, and BootForge tells you what the image is, which wr
   <img alt="Verify" src="https://img.shields.io/badge/verify-after%20writing-7ED321?style=flat-square" />
   <img alt="Setup and portable" src="https://img.shields.io/badge/setup%20%2B%20portable-no%20runtimes-10C98F?style=flat-square" />
   <img alt="No telemetry" src="https://img.shields.io/badge/telemetry-none-10C98F?style=flat-square" />
-  <img alt="Tests" src="https://img.shields.io/badge/tests-217%20passing-10C98F?style=flat-square" />
+  <img alt="Tests" src="https://img.shields.io/badge/tests-233%20passing-10C98F?style=flat-square" />
   <img alt="Made by Zheer Khalid" src="https://img.shields.io/badge/made%20by-Zheer%20Khalid-FF5A4E?style=flat-square" />
 </p>
 
@@ -30,6 +30,7 @@ Pick an image, pick a drive, and BootForge tells you what the image is, which wr
 [**Screenshots**](#%EF%B8%8F-screenshots) ·
 [**Download**](#-download) ·
 [**Safety**](#%EF%B8%8F-safety) ·
+[**Changelog**](CHANGELOG.md) ·
 [**Developer**](#-developer)
 
 <img src="docs/screenshots/create.png" alt="BootForge main window" width="900" />
@@ -39,7 +40,7 @@ Pick an image, pick a drive, and BootForge tells you what the image is, which wr
 ---
 
 > [!WARNING]
-> **Early release.** BootForge's writer, partitioner, FAT32 formatter and ISO extractor have been tested thoroughly against disk image files, but this first version has **not yet been tested by writing a real USB drive or booting one on real hardware**. Writing erases the chosen drive. Use it on a drive you can afford to wipe, and please report how it goes.
+> **Early release.** BootForge's writer, partitioner, FAT32 formatter and ISO extractor have been tested thoroughly against disk image files, but BootForge has **not yet been tested by writing a real USB drive or booting one on real hardware**. The Windows Setup options write a standard answer file that was checked as a file, not by running a Windows installation with it. Writing erases the chosen drive. Use it on a drive you can afford to wipe, and please report how it goes.
 
 ## ✨ Features
 
@@ -53,6 +54,7 @@ Pick an image, pick a drive, and BootForge tells you what the image is, which wr
 - Windows setup images: `install.wim` size, version and editions
 - Architecture, volume label, file count
 - Recommends the right write mode and explains why
+- Remembers the images you used last
 
 </td>
 <td width="50%" valign="top">
@@ -61,7 +63,9 @@ Pick an image, pick a drive, and BootForge tells you what the image is, which wr
 - **Image mode:** byte-for-byte, for hybrid Linux ISOs and `.img` files
 - **File copy mode:** GPT or MBR, FAT32, files extracted from the ISO, for UEFI boot
 - Splits a Windows `install.wim` larger than 4 GB using the DISM tool already on your PC
+- **Windows Setup options:** skip the TPM, Secure Boot and RAM checks of Windows 11, set up with a local account, skip the privacy questions
 - Verify after writing; optional bad-block check first
+- Keeps the PC awake while it works and flashes the taskbar when it is done
 
 </td>
 </tr>
@@ -80,7 +84,8 @@ Pick an image, pick a drive, and BootForge tells you what the image is, which wr
 ### #️⃣ Checksums
 - MD5, SHA-1 and SHA-256 of any image
 - Paste the publisher's checksum to compare
-- Also from the command line: `BootForge.exe --hash <file>`
+- Finds the publisher's checksum file next to the image (`SHA256SUMS`, `image.iso.sha256`, …) and checks the image against it
+- Also from the command line: `BootForge.exe --hash <file> [--expect <checksum>]`
 
 </td>
 </tr>
@@ -121,6 +126,13 @@ Not supported in this version: BIOS/CSM boot from copied files, NTFS targets, an
 </tr>
 </table>
 
+<table>
+<tr>
+<td width="50%" align="center"><b>Start page with recent images</b><br><img src="docs/screenshots/empty.png" alt="Start page" /></td>
+<td width="50%" align="center"><b>Settings</b><br><img src="docs/screenshots/settings.png" alt="Settings" /></td>
+</tr>
+</table>
+
 <sub>Screenshots use the built-in demo mode (<code>BootForge.exe --demo</code>), which shows invented drives and images and touches no drive.</sub>
 
 ## 📥 Download
@@ -134,6 +146,8 @@ Get it from the [**latest release**](https://github.com/zheerkhalid/bootforge/re
 | `BootForge.exe` | The bare 4.8 MB EXE |
 
 BootForge starts without administrator rights and asks for them when you start writing.
+
+What changed in each version is listed in the [**changelog**](CHANGELOG.md).
 
 ## 🛡️ Safety
 
@@ -161,7 +175,7 @@ cargo test
 |---|---|
 | `BootForge.exe --demo` | Invented drives and images; no drive is touched |
 | `BootForge.exe --inspect <file>` | Print what BootForge finds out about an image |
-| `BootForge.exe --hash <file>` | Print MD5, SHA-1 and SHA-256 |
+| `BootForge.exe --hash <file>` | Print MD5, SHA-1 and SHA-256; with `--expect <checksum>` (or a checksum file next to the file) also compare, exit code 2 on a mismatch |
 | `BootForge.exe --selftest` | Build synthetic ISOs, write them to image files in both modes, and verify by parsing them back |
 
 ```
@@ -170,6 +184,7 @@ src/
   part.rs      GPT and MBR
   fat32.rs     FAT32 formatter and writer
   engine/      the write jobs
+  unattend.rs  the Windows Setup answer file
   safety.rs    which drives may be written
   device/      drive enumeration and raw access
   ui/          the egui interface

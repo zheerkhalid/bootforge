@@ -85,6 +85,7 @@ fn file_options(scheme: Scheme, label: &str) -> WriteOptions {
         bad_block_check: false,
         verify: true,
         eject: false,
+        setup: Default::default(),
     }
 }
 
@@ -342,7 +343,17 @@ fn run_inner(log: &mut Vec<String>, keep: Option<&Path>) -> Result<()> {
     {
         let path = dir.join("device-files-mbr.img");
         let mut dev = FileDevice::create(&path, 80 * MIB, 512).map_err(io("device file"))?;
-        let opts = file_options(Scheme::Mbr, &win_advice.default_label);
+        // With every Windows Setup option on: the answer file must arrive too.
+        ensure(
+            win_advice.setup_tweaks.available(),
+            "Windows Setup options offered for a setup image",
+        )?;
+        let mut opts = file_options(Scheme::Mbr, &win_advice.default_label);
+        opts.setup = crate::model::SetupTweaks {
+            skip_requirements: true,
+            local_account: true,
+            skip_privacy: true,
+        };
         let report = write_files(&iso_win, &mut dev, &opts, &params, &cancel, &mut rep)?;
         let table = part::read_table(&mut dev)?;
         ensure(table.problems.is_empty(), "MBR consistent")?;
@@ -363,6 +374,20 @@ fn run_inner(log: &mut Vec<String>, keep: Option<&Path>) -> Result<()> {
         ok(format!(
             "Windows-style UDF ISO, file copy (MBR + FAT32): {n} files identical, {} editions read from the WIM",
             w.editions.len()
+        ));
+        let expected = crate::unattend::build(&opts.setup, &win_info.archs)
+            .ok_or_else(|| Error::msg("no answer file was built"))?;
+        let mut vol = SubDevice::new(&mut dev, report.partition_offset, report.partition_size)
+            .map_err(|e| Error::io("partition", e))?;
+        let got = fat32::read_file(&mut vol, crate::unattend::FILE_NAME)?;
+        ensure(
+            report.answer_file && got == expected.as_bytes(),
+            "answer file on the volume is the one that was built",
+        )?;
+        ok(format!(
+            "Windows Setup options: {} ({} bytes) added and read back identical",
+            crate::unattend::FILE_NAME,
+            got.len()
         ));
     }
 

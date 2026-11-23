@@ -81,9 +81,31 @@ pub fn normalize_hash(text: &str) -> String {
         .collect()
 }
 
+/// The full path of a file named on the command line. A relative path is
+/// resolved against the current folder now, because it would point somewhere
+/// else after BootForge restarts itself as administrator (Windows starts
+/// elevated programs in its own system folder).
+pub fn absolute_path(path: &std::path::Path) -> std::path::PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_line_paths_become_absolute() {
+        use std::path::Path;
+        let here = std::env::current_dir().unwrap();
+        assert_eq!(absolute_path(Path::new("some.iso")), here.join("some.iso"));
+        assert_eq!(
+            absolute_path(Path::new("images\\some.iso")),
+            here.join("images").join("some.iso")
+        );
+        let full = Path::new("D:\\Images\\some.iso");
+        assert_eq!(absolute_path(full), full);
+        assert!(absolute_path(Path::new("x.img")).is_absolute());
+    }
 
     #[test]
     fn sizes() {

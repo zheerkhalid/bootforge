@@ -65,6 +65,46 @@ pub fn compare_hash(pasted: &str, sums: &Checksums) -> HashVerdict {
     }
 }
 
+/// A checksum published next to `image` (in `image.sha256`, `SHA256SUMS`, ...):
+/// the checksum file's name and the checksum it lists for the image.
+pub fn published_checksum(image: &Path) -> Option<(String, String)> {
+    let found = hash::find_sidecar(image)?;
+    let name = found
+        .file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Some((name, found.digest))
+}
+
+/// The lines `--hash` prints after the checksums when there is something to
+/// compare them with: the value given with `--expect`, else a checksum
+/// published next to the file. The flag is false when the comparison failed.
+pub fn hash_check_lines(
+    sums: &Checksums,
+    expect: Option<&str>,
+    published: Option<(String, String)>,
+) -> (Vec<String>, bool) {
+    let (source, text) = match (expect, published) {
+        (Some(e), _) => ("the expected checksum".to_string(), e.to_string()),
+        (None, Some((file, digest))) => (format!("the checksum listed in {file}"), digest),
+        (None, None) => return (Vec::new(), true),
+    };
+    match compare_hash(&text, sums) {
+        HashVerdict::Match(algo) => (vec![format!("OK      {algo} matches {source}")], true),
+        HashVerdict::Mismatch => (
+            vec![format!("FAILED  the file does not match {source}")],
+            false,
+        ),
+        HashVerdict::Empty | HashVerdict::NotAHash => (
+            vec![format!(
+                "FAILED  {source} is not an MD5, SHA-1 or SHA-256 checksum"
+            )],
+            false,
+        ),
+    }
+}
+
 pub fn is_elevated() -> bool {
     sys::is_elevated()
 }
@@ -92,6 +132,29 @@ pub fn attach_console() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_line_checksum_check() {
+        let sums = Checksums {
+            md5: "900150983cd24fb0d6963f7d28e17f72".into(),
+            sha1: "a9993e364706816aba3e25717850c26c9cd0d89d".into(),
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
+        };
+        // Nothing to compare with: nothing is printed and nothing fails.
+        assert_eq!(hash_check_lines(&sums, None, None), (Vec::new(), true));
+        let (lines, ok) = hash_check_lines(&sums, Some(&sums.sha1.to_uppercase()), None);
+        assert!(ok && lines[0].starts_with("OK") && lines[0].contains("SHA-1"));
+        let (lines, ok) = hash_check_lines(&sums, Some(&"0".repeat(64)), None);
+        assert!(!ok && lines[0].starts_with("FAILED"));
+        let (lines, ok) = hash_check_lines(&sums, Some("not a checksum"), None);
+        assert!(!ok && lines[0].contains("is not an MD5"));
+        // A published checksum is used when none was given, and loses to one that was.
+        let published = Some(("SHA256SUMS".to_string(), sums.sha256.clone()));
+        let (lines, ok) = hash_check_lines(&sums, None, published.clone());
+        assert!(ok && lines[0].contains("listed in SHA256SUMS"));
+        let (_, ok) = hash_check_lines(&sums, Some(&"0".repeat(32)), published);
+        assert!(!ok);
+    }
 
     #[test]
     fn verdicts() {

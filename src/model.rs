@@ -228,6 +228,8 @@ pub struct WindowsInfo {
     /// Has `sources/boot.wim` and `bootmgr`-style setup files (a setup disc
     /// rather than e.g. a recovery or PE disc).
     pub is_setup: bool,
+    /// The image already has an `autounattend.xml` of its own in its root.
+    pub has_answer_file: bool,
 }
 
 /// What the inspector found out about an image file. Facts only: what to do
@@ -350,6 +352,41 @@ impl FileSystem {
     }
 }
 
+/// Optional changes to how Windows Setup behaves, made by adding an answer
+/// file (`autounattend.xml`) to the drive in file-copy mode. Nothing in the
+/// image itself is changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SetupTweaks {
+    /// Windows 11: do not stop on a missing TPM 2.0, Secure Boot or 4 GB of RAM.
+    pub skip_requirements: bool,
+    /// Offer a local account instead of insisting on a Microsoft account.
+    pub local_account: bool,
+    /// Skip the privacy questions of the first start, answering "no" to all.
+    pub skip_privacy: bool,
+}
+
+impl SetupTweaks {
+    pub fn any(&self) -> bool {
+        self.skip_requirements || self.local_account || self.skip_privacy
+    }
+
+    /// The chosen tweaks in plain words, for confirmations and summaries.
+    pub fn describe(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.skip_requirements {
+            out.push("skip the TPM, Secure Boot and RAM checks");
+        }
+        if self.local_account {
+            out.push("allow a local account");
+        }
+        if self.skip_privacy {
+            out.push("skip the privacy questions");
+        }
+        out
+    }
+}
+
 /// Everything the user chose for one write.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WriteOptions {
@@ -369,6 +406,8 @@ pub struct WriteOptions {
     pub verify: bool,
     /// Safely remove the drive when done.
     pub eject: bool,
+    /// Windows setup images in file-copy mode: changes made through an answer file.
+    pub setup: SetupTweaks,
 }
 
 impl Default for WriteOptions {
@@ -384,6 +423,7 @@ impl Default for WriteOptions {
             bad_block_check: false,
             verify: true,
             eject: false,
+            setup: SetupTweaks::default(),
         }
     }
 }

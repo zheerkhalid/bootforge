@@ -104,9 +104,18 @@ fn job_intro(job: &Job) -> String {
                 WriteMode::Image => format!(
                     "{name} will be written to this drive byte for byte. Everything that is on the drive now is lost."
                 ),
-                WriteMode::Files => format!(
-                    "The drive will be repartitioned and formatted, then the files of {name} are copied to it. Everything that is on the drive now is lost."
-                ),
+WriteMode::Files => {
+                    let mut text = format!(
+                        "The drive will be repartitioned and formatted, then the files of {name} are copied to it. Everything that is on the drive now is lost."
+                    );
+                    if options.setup.any() {
+                        text.push_str(&format!(
+                            " An answer file is added so that Windows Setup will {}.",
+                            options.setup.describe().join(", ")
+                        ));
+                    }
+                    text
+                }
             }
         }
         Job::Reset { options, .. } => format!(
@@ -281,6 +290,13 @@ impl App {
         }
         run.outcome = Some(outcome);
         run.ask_cancel = false;
+        // A long job usually ends while the user is doing something else:
+        // flash the taskbar button until the window is looked at.
+        if !ctx.input(|i| i.focused) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
         // The drive has new contents: read the list again.
         self.reload_disks(ctx);
     }

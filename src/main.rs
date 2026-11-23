@@ -19,7 +19,11 @@ const USAGE: &str = "BootForge
                                      temp folder in both modes, verify by parsing them back
         [--keep <folder>]            leave the image files in this folder afterwards
   BootForge.exe --inspect <file>     print what BootForge finds out about an image
-  BootForge.exe --hash <file>        print MD5, SHA-1 and SHA-256 of a file";
+  BootForge.exe --hash <file>        print MD5, SHA-1 and SHA-256 of a file
+        [--expect <checksum>]        and compare with this checksum (exit code 2 when it
+                                     differs); without it, a checksum file next to the
+                                     file (SHA256SUMS, <file>.sha256, ...) is used
+  BootForge.exe --version            print the version";
 
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -34,6 +38,7 @@ fn main() -> eframe::Result<()> {
     let console = has("--help")
         || has("-h")
         || has("/?")
+        || has("--version")
         || has("--selftest")
         || has("--inspect")
         || has("--hash");
@@ -42,6 +47,10 @@ fn main() -> eframe::Result<()> {
     }
     if has("--help") || has("-h") || has("/?") {
         println!("{USAGE}");
+        return Ok(());
+    }
+    if has("--version") {
+        println!("BootForge {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     if has("--selftest") {
@@ -77,12 +86,20 @@ fn main() -> eframe::Result<()> {
     }
     if let Some(file) = value("--hash") {
         let cancel = bootforge::model::Cancel::new();
-        match bootforge::backend::hash_file(&PathBuf::from(file), &cancel, &mut |_| {}) {
+        let file = PathBuf::from(file);
+        match bootforge::backend::hash_file(&file, &cancel, &mut |_| {}) {
             Ok(sums) => {
                 println!("MD5     {}", sums.md5);
                 println!("SHA-1   {}", sums.sha1);
                 println!("SHA-256 {}", sums.sha256);
-                std::process::exit(0);
+                let expect = value("--expect");
+                let published = bootforge::backend::published_checksum(&file);
+                let (lines, ok) =
+                    bootforge::backend::hash_check_lines(&sums, expect.as_deref(), published);
+                for line in lines {
+                    println!("{line}");
+                }
+                std::process::exit(if ok { 0 } else { 2 });
             }
             Err(e) => {
                 println!("{e}");
@@ -96,7 +113,7 @@ fn main() -> eframe::Result<()> {
         screenshot: value("--screenshot").map(PathBuf::from),
         view: value("--view").or_else(|| std::env::var("BOOTFORGE_VIEW").ok()),
         light: has("--light"),
-        image: value("--image").map(PathBuf::from),
+        image: value("--image").map(|p| bootforge::util::absolute_path(&PathBuf::from(p))),
         disk: value("--disk").and_then(|n| n.parse().ok()),
     };
     ui::run(options, window_icon())
